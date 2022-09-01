@@ -39,39 +39,38 @@
 // This package provides several flags that modify this behavior.
 // As a result, flag.Parse must be called before any logging is done.
 //
-//	-logtostderr=true
-//		Logs are written to standard error instead of to files.
-//              This shortcuts most of the usual output routing:
-//              -alsologtostderr, -stderrthreshold and -log_dir have no
-//              effect and output redirection at runtime with SetOutput is
-//              ignored.
-//	-alsologtostderr=false
-//		Logs are written to standard error as well as to files.
-//	-stderrthreshold=ERROR
-//		Log events at or above this severity are logged to standard
-//		error as well as to files.
-//	-log_dir=""
-//		Log files will be written to this directory instead of the
-//		default temporary directory.
+//		-logtostderr=true
+//			Logs are written to standard error instead of to files.
+//	             This shortcuts most of the usual output routing:
+//	             -alsologtostderr, -stderrthreshold and -log_dir have no
+//	             effect and output redirection at runtime with SetOutput is
+//	             ignored.
+//		-alsologtostderr=false
+//			Logs are written to standard error as well as to files.
+//		-stderrthreshold=ERROR
+//			Log events at or above this severity are logged to standard
+//			error as well as to files.
+//		-log_dir=""
+//			Log files will be written to this directory instead of the
+//			default temporary directory.
 //
-//	Other flags provide aids to debugging.
+//		Other flags provide aids to debugging.
 //
-//	-log_backtrace_at=""
-//		When set to a file and line number holding a logging statement,
-//		such as
-//			-log_backtrace_at=gopherflakes.go:234
-//		a stack trace will be written to the Info log whenever execution
-//		hits that statement. (Unlike with -vmodule, the ".go" must be
-//		present.)
-//	-v=0
-//		Enable V-leveled logging at the specified level.
-//	-vmodule=""
-//		The syntax of the argument is a comma-separated list of pattern=N,
-//		where pattern is a literal file name (minus the ".go" suffix) or
-//		"glob" pattern and N is a V level. For instance,
-//			-vmodule=gopher*=3
-//		sets the V level to 3 in all Go files whose names begin "gopher".
-//
+//		-log_backtrace_at=""
+//			When set to a file and line number holding a logging statement,
+//			such as
+//				-log_backtrace_at=gopherflakes.go:234
+//			a stack trace will be written to the Info log whenever execution
+//			hits that statement. (Unlike with -vmodule, the ".go" must be
+//			present.)
+//		-v=0
+//			Enable V-leveled logging at the specified level.
+//		-vmodule=""
+//			The syntax of the argument is a comma-separated list of pattern=N,
+//			where pattern is a literal file name (minus the ".go" suffix) or
+//			"glob" pattern and N is a V level. For instance,
+//				-vmodule=gopher*=3
+//			sets the V level to 3 in all Go files whose names begin "gopher".
 package klog
 
 import (
@@ -96,6 +95,7 @@ import (
 
 	"k8s.io/klog/v2/internal/buffer"
 	"k8s.io/klog/v2/internal/clock"
+	"k8s.io/klog/v2/internal/dbg"
 	"k8s.io/klog/v2/internal/serialize"
 	"k8s.io/klog/v2/internal/severity"
 )
@@ -549,7 +549,11 @@ type loggingT struct {
 	vmap map[uintptr]Level
 }
 
-var logging loggingT
+var logging = loggingT{
+	settings: settings{
+		contextualLoggingEnabled: true,
+	},
+}
 
 // setVState sets a consistent state for V logging.
 // l.mu is held.
@@ -628,8 +632,11 @@ It returns a buffer containing the formatted header and the user's file and line
 The depth specifies how many stack frames above lives the source line to be identified in the log message.
 
 Log lines have this form:
+
 	Lmmdd hh:mm:ss.uuuuuu threadid file:line] msg...
+
 where the fields are defined as follows:
+
 	L                A single character, representing the log level (eg 'I' for INFO)
 	mm               The month (zero padded; ie May is '05')
 	dd               The day (zero padded)
@@ -859,7 +866,7 @@ func (l *loggingT) output(s severity.Severity, log *logr.Logger, buf *buffer.Buf
 
 	if l.traceLocation.isSet() {
 		if l.traceLocation.match(file, line) {
-			buf.Write(stacks(false))
+			buf.Write(dbg.Stacks(false))
 		}
 	}
 	data := buf.Bytes()
@@ -928,11 +935,11 @@ func (l *loggingT) output(s severity.Severity, log *logr.Logger, buf *buffer.Buf
 		// If -logtostderr has been specified, the loop below will do that anyway
 		// as the first stack in the full dump.
 		if !l.toStderr {
-			os.Stderr.Write(stacks(false))
+			os.Stderr.Write(dbg.Stacks(false))
 		}
 
 		// Write the stack trace for all goroutines to the files.
-		trace := stacks(true)
+		trace := dbg.Stacks(true)
 		logExitFunc = func(error) {} // If we get a write error, we'll still exit below.
 		for log := severity.FatalLog; log >= severity.InfoLog; log-- {
 			if f := l.file[log]; f != nil { // Can be nil if -logtostderr is set.
@@ -950,25 +957,6 @@ func (l *loggingT) output(s severity.Severity, log *logr.Logger, buf *buffer.Buf
 		atomic.AddInt64(&stats.lines, 1)
 		atomic.AddInt64(&stats.bytes, int64(len(data)))
 	}
-}
-
-// stacks is a wrapper for runtime.Stack that attempts to recover the data for all goroutines.
-func stacks(all bool) []byte {
-	// We don't know how big the traces are, so grow a few times if they don't fit. Start large, though.
-	n := 10000
-	if all {
-		n = 100000
-	}
-	var trace []byte
-	for i := 0; i < 5; i++ {
-		trace = make([]byte, n)
-		nbytes := runtime.Stack(trace, all)
-		if nbytes < len(trace) {
-			return trace[:nbytes]
-		}
-		n *= 2
-	}
-	return trace
 }
 
 // logExitFunc provides a simple mechanism to override the default behavior
@@ -1312,9 +1300,13 @@ func newVerbose(level Level, b bool) Verbose {
 // The returned value is a struct of type Verbose, which implements Info, Infoln
 // and Infof. These methods will write to the Info log if called.
 // Thus, one may write either
+//
 //	if klog.V(2).Enabled() { klog.Info("log this") }
+//
 // or
+//
 //	klog.V(2).Info("log this")
+//
 // The second form is shorter but the first is cheaper if logging is off because it does
 // not evaluate its arguments.
 //
@@ -1596,10 +1588,10 @@ func ErrorSDepth(depth int, err error, msg string, keysAndValues ...interface{})
 //
 // Callers who want more control over handling of fatal events may instead use a
 // combination of different functions:
-// - some info or error logging function, optionally with a stack trace
-//   value generated by github.com/go-logr/lib/dbg.Backtrace
-// - Flush to flush pending log data
-// - panic, os.Exit or returning to the caller with an error
+//   - some info or error logging function, optionally with a stack trace
+//     value generated by github.com/go-logr/lib/dbg.Backtrace
+//   - Flush to flush pending log data
+//   - panic, os.Exit or returning to the caller with an error
 //
 // Arguments are handled in the manner of fmt.Print; a newline is appended if missing.
 func Fatal(args ...interface{}) {
