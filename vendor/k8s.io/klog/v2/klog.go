@@ -396,45 +396,48 @@ type flushSyncWriter interface {
 	io.Writer
 }
 
-// init sets up the defaults.
+var logging loggingT
+var commandLine flag.FlagSet
+
+// init sets up the defaults and creates command line flags.
 func init() {
+	commandLine.StringVar(&logging.logDir, "log_dir", "", "If non-empty, write log files in this directory (no effect when -logtostderr=true)")
+	commandLine.StringVar(&logging.logFile, "log_file", "", "If non-empty, use this log file (no effect when -logtostderr=true)")
+	commandLine.Uint64Var(&logging.logFileMaxSizeMB, "log_file_max_size", 1800,
+		"Defines the maximum size a log file can grow to (no effect when -logtostderr=true). Unit is megabytes. "+
+			"If the value is 0, the maximum file size is unlimited.")
+	commandLine.BoolVar(&logging.toStderr, "logtostderr", true, "log to standard error instead of files")
+	commandLine.BoolVar(&logging.alsoToStderr, "alsologtostderr", false, "log to standard error as well as files (no effect when -logtostderr=true)")
+	logging.setVState(0, nil, false)
+	commandLine.Var(&logging.verbosity, "v", "number for the log level verbosity")
+	commandLine.BoolVar(&logging.addDirHeader, "add_dir_header", false, "If true, adds the file directory to the header of the log messages")
+	commandLine.BoolVar(&logging.skipHeaders, "skip_headers", false, "If true, avoid header prefixes in the log messages")
+	commandLine.BoolVar(&logging.oneOutput, "one_output", false, "If true, only write logs to their native severity level (vs also writing to each lower severity level; no effect when -logtostderr=true)")
+	commandLine.BoolVar(&logging.skipLogHeaders, "skip_log_headers", false, "If true, avoid headers when opening log files (no effect when -logtostderr=true)")
 	logging.stderrThreshold = severityValue{
 		Severity: severity.ErrorLog, // Default stderrThreshold is ERROR.
 	}
-	logging.setVState(0, nil, false)
-	logging.logDir = ""
-	logging.logFile = ""
-	logging.logFileMaxSizeMB = 1800
-	logging.toStderr = true
-	logging.alsoToStderr = false
-	logging.skipHeaders = false
-	logging.addDirHeader = false
-	logging.skipLogHeaders = false
-	logging.oneOutput = false
+	commandLine.Var(&logging.stderrThreshold, "stderrthreshold", "logs at or above this threshold go to stderr when writing to files and stderr (no effect when -logtostderr=true or -alsologtostderr=false)")
+	commandLine.Var(&logging.vmodule, "vmodule", "comma-separated list of pattern=N settings for file-filtered logging")
+	commandLine.Var(&logging.traceLocation, "log_backtrace_at", "when logging hits line file:N, emit a stack trace")
+
+	logging.settings.contextualLoggingEnabled = true
 	logging.flushD = newFlushDaemon(logging.lockAndFlushAll, nil)
 }
 
 // InitFlags is for explicitly initializing the flags.
+// It may get called repeatedly for different flagsets, but not
+// twice for the same one. May get called concurrently
+// to other goroutines using klog. However, only some flags
+// may get set concurrently (see implementation).
 func InitFlags(flagset *flag.FlagSet) {
 	if flagset == nil {
 		flagset = flag.CommandLine
 	}
 
-	flagset.StringVar(&logging.logDir, "log_dir", logging.logDir, "If non-empty, write log files in this directory (no effect when -logtostderr=true)")
-	flagset.StringVar(&logging.logFile, "log_file", logging.logFile, "If non-empty, use this log file (no effect when -logtostderr=true)")
-	flagset.Uint64Var(&logging.logFileMaxSizeMB, "log_file_max_size", logging.logFileMaxSizeMB,
-		"Defines the maximum size a log file can grow to (no effect when -logtostderr=true). Unit is megabytes. "+
-			"If the value is 0, the maximum file size is unlimited.")
-	flagset.BoolVar(&logging.toStderr, "logtostderr", logging.toStderr, "log to standard error instead of files")
-	flagset.BoolVar(&logging.alsoToStderr, "alsologtostderr", logging.alsoToStderr, "log to standard error as well as files (no effect when -logtostderr=true)")
-	flagset.Var(&logging.verbosity, "v", "number for the log level verbosity")
-	flagset.BoolVar(&logging.addDirHeader, "add_dir_header", logging.addDirHeader, "If true, adds the file directory to the header of the log messages")
-	flagset.BoolVar(&logging.skipHeaders, "skip_headers", logging.skipHeaders, "If true, avoid header prefixes in the log messages")
-	flagset.BoolVar(&logging.oneOutput, "one_output", logging.oneOutput, "If true, only write logs to their native severity level (vs also writing to each lower severity level; no effect when -logtostderr=true)")
-	flagset.BoolVar(&logging.skipLogHeaders, "skip_log_headers", logging.skipLogHeaders, "If true, avoid headers when opening log files (no effect when -logtostderr=true)")
-	flagset.Var(&logging.stderrThreshold, "stderrthreshold", "logs at or above this threshold go to stderr when writing to files and stderr (no effect when -logtostderr=true or -alsologtostderr=false)")
-	flagset.Var(&logging.vmodule, "vmodule", "comma-separated list of pattern=N settings for file-filtered logging")
-	flagset.Var(&logging.traceLocation, "log_backtrace_at", "when logging hits line file:N, emit a stack trace")
+	commandLine.VisitAll(func(f *flag.Flag) {
+		flagset.Var(f.Value, f.Name, f.Usage)
+	})
 }
 
 // Flush flushes all pending log I/O.
@@ -529,11 +532,6 @@ func (s settings) deepCopy() settings {
 type loggingT struct {
 	settings
 
-	// bufferCache maintains the free list. It uses its own mutex
-	// so buffers can be grabbed and printed to without holding the main lock,
-	// for better parallelization.
-	bufferCache buffer.Buffers
-
 	// flushD holds a flushDaemon that frequently flushes log file buffers.
 	// Uses its own mutex.
 	flushD *flushDaemon
@@ -547,12 +545,6 @@ type loggingT struct {
 	// vmap is a cache of the V Level for each V() call site, identified by PC.
 	// It is wiped whenever the vmodule flag changes state.
 	vmap map[uintptr]Level
-}
-
-var logging = loggingT{
-	settings: settings{
-		contextualLoggingEnabled: true,
-	},
 }
 
 // setVState sets a consistent state for V logging.
@@ -667,7 +659,7 @@ func (l *loggingT) header(s severity.Severity, depth int) (*buffer.Buffer, strin
 
 // formatHeader formats a log header using the provided file name and line number.
 func (l *loggingT) formatHeader(s severity.Severity, file string, line int) *buffer.Buffer {
-	buf := l.bufferCache.GetBuffer()
+	buf := buffer.GetBuffer()
 	if l.skipHeaders {
 		return buf
 	}
@@ -685,8 +677,8 @@ func (l *loggingT) printlnDepth(s severity.Severity, logger *logr.Logger, filter
 	// if logger is set, we clear the generated header as we rely on the backing
 	// logger implementation to print headers
 	if logger != nil {
-		l.bufferCache.PutBuffer(buf)
-		buf = l.bufferCache.GetBuffer()
+		buffer.PutBuffer(buf)
+		buf = buffer.GetBuffer()
 	}
 	if filter != nil {
 		args = filter.Filter(args)
@@ -704,8 +696,8 @@ func (l *loggingT) printDepth(s severity.Severity, logger *logr.Logger, filter L
 	// if logr is set, we clear the generated header as we rely on the backing
 	// logr implementation to print headers
 	if logger != nil {
-		l.bufferCache.PutBuffer(buf)
-		buf = l.bufferCache.GetBuffer()
+		buffer.PutBuffer(buf)
+		buf = buffer.GetBuffer()
 	}
 	if filter != nil {
 		args = filter.Filter(args)
@@ -726,8 +718,8 @@ func (l *loggingT) printfDepth(s severity.Severity, logger *logr.Logger, filter 
 	// if logr is set, we clear the generated header as we rely on the backing
 	// logr implementation to print headers
 	if logger != nil {
-		l.bufferCache.PutBuffer(buf)
-		buf = l.bufferCache.GetBuffer()
+		buffer.PutBuffer(buf)
+		buf = buffer.GetBuffer()
 	}
 	if filter != nil {
 		format, args = filter.FilterF(format, args)
@@ -747,8 +739,8 @@ func (l *loggingT) printWithFileLine(s severity.Severity, logger *logr.Logger, f
 	// if logr is set, we clear the generated header as we rely on the backing
 	// logr implementation to print headers
 	if logger != nil {
-		l.bufferCache.PutBuffer(buf)
-		buf = l.bufferCache.GetBuffer()
+		buffer.PutBuffer(buf)
+		buf = buffer.GetBuffer()
 	}
 	if filter != nil {
 		args = filter.Filter(args)
@@ -788,7 +780,7 @@ func (l *loggingT) infoS(logger *logr.Logger, filter LogFilter, depth int, msg s
 // set log severity by s
 func (l *loggingT) printS(err error, s severity.Severity, depth int, msg string, keysAndValues ...interface{}) {
 	// Only create a new buffer if we don't have one cached.
-	b := l.bufferCache.GetBuffer()
+	b := buffer.GetBuffer()
 	// The message is always quoted, even if it contains line breaks.
 	// If developers want multi-line output, they should use a small, fixed
 	// message and put the multi-line output into a value.
@@ -799,7 +791,7 @@ func (l *loggingT) printS(err error, s severity.Severity, depth int, msg string,
 	serialize.KVListFormat(&b.Buffer, keysAndValues...)
 	l.printDepth(s, logging.logger, nil, depth+1, &b.Buffer)
 	// Make the buffer available for reuse.
-	l.bufferCache.PutBuffer(b)
+	buffer.PutBuffer(b)
 }
 
 // redirectBuffer is used to set an alternate destination for the logs
@@ -951,7 +943,7 @@ func (l *loggingT) output(s severity.Severity, log *logr.Logger, buf *buffer.Buf
 		timeoutFlush(ExitFlushTimeout)
 		OsExit(255) // C++ uses -1, which is silly because it's anded with 255 anyway.
 	}
-	l.bufferCache.PutBuffer(buf)
+	buffer.PutBuffer(buf)
 
 	if stats := severityStats[s]; stats != nil {
 		atomic.AddInt64(&stats.lines, 1)
@@ -1316,6 +1308,13 @@ func newVerbose(level Level, b bool) Verbose {
 // less than or equal to the value of the -vmodule pattern matching the source file
 // containing the call.
 func V(level Level) Verbose {
+	return VDepth(1, level)
+}
+
+// VDepth is a variant of V that accepts a number of stack frames that will be
+// skipped when checking the -vmodule patterns. VDepth(0) is equivalent to
+// V().
+func VDepth(depth int, level Level) Verbose {
 	// This function tries hard to be cheap unless there's work to do.
 	// The fast path is two atomic loads and compares.
 
@@ -1332,7 +1331,7 @@ func V(level Level) Verbose {
 		// but if V logging is enabled we're slow anyway.
 		logging.mu.Lock()
 		defer logging.mu.Unlock()
-		if runtime.Callers(2, logging.pcs[:]) == 0 {
+		if runtime.Callers(2+depth, logging.pcs[:]) == 0 {
 			return newVerbose(level, false)
 		}
 		// runtime.Callers returns "return PCs", but we want
