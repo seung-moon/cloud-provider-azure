@@ -20,7 +20,7 @@ require (
 	github.com/Azure/go-autorest/tracing v0.6.0
 	github.com/evanphx/json-patch v5.7.0+incompatible
 	github.com/fsnotify/fsnotify v1.7.0
-	github.com/go-logr/logr v1.3.0
+	github.com/go-logr/logr v1.4.1
 	github.com/golang/mock v1.6.0
 	github.com/onsi/ginkgo/v2 v2.13.2
 	github.com/onsi/gomega v1.30.0
@@ -39,7 +39,7 @@ require (
 	k8s.io/component-base v0.28.4
 	k8s.io/component-helpers v0.28.4
 	k8s.io/controller-manager v0.28.4
-	k8s.io/klog/v2 v2.110.1
+	k8s.io/klog/v2 v2.120.1
 	k8s.io/kubelet v0.28.4
 	k8s.io/utils v0.0.0-20231127182322-b307cd553661
 	sigs.k8s.io/cloud-provider-azure/pkg/azclient v0.0.0-20240103055401-88f4ca026f87
