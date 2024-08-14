@@ -14,7 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-FROM --platform=linux/amd64 golang:1.22-bullseye@sha256:78b171fe51f25b8c3197710f281dacae94759a254e9a486576005f9dadba9e7d AS builder
+FROM --platform=linux/amd64 golang:1.23-bullseye@sha256:f8d91a8717c3f06dee141a020cb9640327fe614b9afaf90188a0cc1d0a43c471 AS builder
 
 ARG ENABLE_GIT_COMMAND=true
 ARG ARCH=amd64
